@@ -1,0 +1,100 @@
+Window	298841
+Man	244489
+Building	220802
+House	175772
+Train	168696
+Shirt	150191
+Boy	137675
+Tower	121431
+Door	119964
+Street light	114518
+Trousers	113620
+Tree	113332
+Vehicle registration plate	106939
+Dress	102315
+Woman	101147
+Skirt	100245
+Human head	99854
+Poster	98519
+Tie	88714
+Car	79343
+Girl	70093
+Belt	69191
+Coat	68992
+Jeans	68521
+Tire	68235
+Billboard	67585
+Castle	66908
+Shorts	66549
+Wheel	66205
+Parking meter	65872
+Hat	65761
+Glasses	61550
+Bus	60669
+Watch	58638
+Footwear	58609
+Human face	57984
+Suit	56644
+Taxi	53827
+Ladder	52009
+Human ear	50858
+Traffic sign	49382
+Jacket	49047
+Person	48074
+Stairs	47919
+Traffic light	47257
+Bench	46261
+Sock	46198
+Van	45408
+Curtain	44639
+Boat	43595
+Flag	41968
+Table	40488
+Door handle	40398
+Tank	40196
+Porch	39744
+Fedora	39637
+Horn	39315
+Barge	38491
+Willow	36966
+Scarf	35659
+Earrings	32509
+Necklace	32433
+Camera	32274
+Picture frame	30653
+Chair	30533
+Sculpture	28634
+Airplane	27494
+Clock	27025
+Truck	26228
+Cart	25763
+Human nose	25361
+Convenience store	24639
+Sunglasses	23523
+Palm tree	22242
+Land vehicle	21929
+Horizontal bar	21889
+Couch	21697
+Swimwear	21492
+Human hair	21147
+Flowerpot	20976
+Tin can	20670
+Boot	20211
+Bicycle	20139
+Human arm	19538
+Handbag	19531
+Stop sign	19434
+Waste container	18974
+Human beard	18399
+Plastic bag	18217
+Clothing	18139
+Fountain	17847
+Barrel	17678
+Helmet	17653
+Lamp	17630
+Light switch	17509
+Skyscraper	17454
+Human foot	17336
+Bicycle wheel	17232
+Envelope	16980
+Box	16911

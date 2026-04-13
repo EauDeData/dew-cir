@@ -1,0 +1,82 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs/editors
+.vscode/
+.idea/
+*.iml
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing / coverage
+.coverage
+.coverage.*
+.cache/
+pytest_cache/
+
+# WandB (Weights & Biases)
+wandb/
+
+# Large / generated data files
+*.h5
+*.hdf5
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.pickle
+*.pkl
+
+# JSON files (optional – comment out if needed)
+*.json
+
+# CSV / data dumps (optional)
+*.csv
+*.tsv
+
+# Model checkpoints / outputs
+outputs/
+results/
+checkpoints/
+
+# Misc junk
+*.bak
+*.old
+*.orig
+
+# Secrets / config
+*.env
+*.key
+*.pem
+
+# Mac/Linux trash
+.Trash-*
