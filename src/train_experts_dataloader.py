@@ -5,12 +5,12 @@ from PIL import ImageDraw
 import random
 import os
 PER_IMAGE_OBJECTS_PATH = './objects2img_complete.json'
-
+PER_IMAGE_TEST_PATH = '/home/amolina/DEWGraph/src/objects2image_test.json'
 class ObjectSpecificDateLoader(torch.utils.data.Dataset):
-    def __init__(self, df, object: str, transforms, min_date = 1930, max_date = 1999, freq = 10):
+    def __init__(self, df, object: str, transforms, min_date = 1930, max_date = 1999, freq = 10, evaluate = False):
         super().__init__()
 
-        with open(PER_IMAGE_OBJECTS_PATH, 'r') as f:
+        with open(PER_IMAGE_OBJECTS_PATH if not evaluate else PER_IMAGE_TEST_PATH, 'r') as f:
             elements = json.load(f)[object]
 
         self.freq = freq
@@ -19,7 +19,9 @@ class ObjectSpecificDateLoader(torch.utils.data.Dataset):
         self.category = object
 
         base_folder = f"/data/113-2/users/amolina/cir_date/objects/{object}/"
-        ckpt_path = base_folder + "data_ckpt.json"
+        ckpt_path = base_folder + ("data_ckpt.json" if not evaluate else "evaluation_data_ckpt.json")
+        errors = 0
+
         if os.path.exists(ckpt_path):
             with open(ckpt_path, 'r') as f:
                 self.datum = json.load(f)
@@ -35,15 +37,20 @@ class ObjectSpecificDateLoader(torch.utils.data.Dataset):
                 for classname, bbx  in zip(data['detection_class_entities'], data['detection_boxes']):
                     if classname == object and (bbx[2] - bbx[0]) * (bbx[3] - bbx[1]) > (10000 / 4) /(224*224): # From the original paper
                         # https://github.com/cesc47/DEXPERT/blob/main/src/datasets.py#L145 In my experience 10.000 is a bit exagerated
-                        self.datum.append({
-                            'impath': impath,
-                            'bbox': bbx,
-                            'year': int(df[df['code'] == int(image)]['year'].iloc[0])
-                        })
-            os.makedirs(base_folder)
+                        try:
+                            self.datum.append({
+                                'impath': impath,
+                                'bbox': bbx,
+                                'year': int(df[df['code'] == int(image)]['year'].iloc[0])
+                            })
+                        except IndexError as e:
+                            errors += 1
+            
+
+            os.makedirs(base_folder, exist_ok = True)
             with open(ckpt_path, 'w') as f:
                 json.dump(self.datum, f)
-
+        print(f"Dataset for {object} loaded with {len(self.datum)} samples and {errors} errors")
         self.es_trans = transforms
 
 

@@ -77,6 +77,10 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--use_wandb", action="store_true")
 
+    parser.add_argument("--agnosticity_strategy", type=str, default='normalise', choices=['normalise', 'euclidean'])
+    parser.add_argument("--swapping_trick", type=str, default='do', choices=['do', 'avoid'])
+    parser.add_argument("--train_year_proxy", type=str, default='auxiliar', choices=['auxiliar', 'loss_only'])
+
     args = parser.parse_args()
 
     if len(args.objects) == 1 and args.objects[0].upper() == "ALL":
@@ -259,10 +263,22 @@ def main():
             emb_B_agnostic_centered = emb_B_agnostic - proxy_vectors
             emb_B_conditioned_centered = emb_B_conditioned - proxy_vectors
 
-            all_embeddings = torch.cat([emb_A_agnostic_centered, emb_B_agnostic_centered, emb_A_conditioned_centered, emb_B_conditioned_centered], dim=0)
-            all_embeddings = F.normalize(all_embeddings, p=2, dim=1)
+            if args.swapping_trick == 'do':
+                all_embeddings = torch.cat([emb_A_agnostic_centered, emb_B_agnostic_centered, emb_A_conditioned_centered, emb_B_conditioned_centered], dim=0)
+                year_labels = torch.cat([condition_B, condition_A, condition_A, condition_B], dim=-1)
+            elif args.swapping_trick == 'avoid':
+                all_embeddings = torch.cat([emb_A_agnostic_centered, emb_B_agnostic_centered], dim=0)
+                year_labels = torch.cat([condition_B, condition_A], dim=-1)
+            else:
+                raise NotImplementedError(f"Not implemented {args.swapping_trick}")
 
-            year_labels = torch.cat([condition_B, condition_A, condition_A, condition_B], dim=-1)
+            if args.agnosticity_strategy == 'normalise':
+                all_embeddings = F.normalize(all_embeddings, p=2, dim=1)
+            elif args.agnosticity_strategy == 'euclidean':
+                all_embeddings = all_embeddings
+            else:
+                raise NotImplementedError(f"Not implemented {args.agnosticity_strategy}")
+
 
 
             loss_trans = year_loss_fn(all_embeddings, year_labels)

@@ -6,10 +6,10 @@ from multiprocessing import Pool
 
 base_dew = '/data/113-2/users/amolina/DEW/DEW/DEW/Date_Estimation_in_the_Wild/'
 dew_train_csv = os.path.join(base_dew, 'gt_train_ok.csv')
-dew_test_csv = os.path.join(base_dew, 'gt_val_ok.csv.csv')
+dew_test_csv = os.path.join(base_dew, 'gt_test_ok.csv')
 
 df = pd.read_csv(os.path.join(dew_train_csv), names=['year', 'code'])
-df_test = pd.read_csv(os.path.join(dew_train_csv), names=['year', 'code'])
+df_test = pd.read_csv(os.path.join(dew_test_csv), names=['year', 'code'])
 
 def code2impath(code, base_dew = base_dew):
     code = str(code)
@@ -42,7 +42,7 @@ def list_object_items(dataframe):
 
 
 if __name__ == '__main__':
-    objects, images_with_objects = list_object_items(df)
+    objects, images_with_objects = list_object_items(df_test)
     imgs = {k: [int(x) for x in v] for k, v in images_with_objects.items()}
-    json.dump(imgs, open('objects2img_TMP.json', 'w'), indent=3)
+    json.dump(imgs, open('objects2image_test.json', 'w'), indent=3)
 
