@@ -5,20 +5,15 @@ detect_segment_year_hf_sam2.py
 Upload an image via browser →
   1. OWLv2 detects objects from --objects list  (boxes only – used for crop inference)
   2. SAM2 segments each detected box into a precise pixel mask  (used for visualisation only)
-  3. CIR model infers category + year via PROXY CLOSENESS (same logic as qualitative.py)
-       • cat_idx  = argmin_c  dist(emb,        cat_proxy[c])
-       • year_idx = argmin_y  dist(emb − cat_proxy[cat_idx],  year_proxy[y])
+  3. CIR model infers category + year via PROXY CLOSENESS 
   4. Results returned:
        • Left  – masks coloured by inferred CATEGORY  (+ legend)
        • Right – masks coloured by inferred YEAR       (+ legend)
        • Below – interactive canvas: hover a region to see category + year tooltip
-
-Inference boxes:
-  The OWLv2 bounding box is cropped and fed to the CNN.
-  SAM2 is only used to paint a tight mask in the overlay – it does NOT affect inference.
+       • (NEW) Hovering will ping the server with the crop embedding to show top 5 similar images
 
 Dependencies:
-    pip install -U transformers accelerate flask pillow matplotlib torch torchvision pytorch-metric-learning
+    pip install -U transformers accelerate flask pillow matplotlib torch torchvision pytorch-metric-learning annoy
 
 Recommended SAM2 checkpoint:
     facebook/sam2.1-hiera-small
@@ -38,6 +33,7 @@ import matplotlib.cm as cm
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, jsonify, render_template_string, request
 from pytorch_metric_learning import losses
@@ -95,7 +91,6 @@ def _year_to_rgb(year_idx: int, n_years: int) -> tuple:
     return tuple(int(c * 255) for c in rgb)
 
 
-
 def build_annoy_index(
     objects: list,
     ckpt_folder: str,
@@ -138,12 +133,10 @@ def pil_from_b64(b64_str: str) -> Image.Image:
     data = base64.b64decode(b64_str.split(",", 1)[-1])
     return Image.open(io.BytesIO(data)).convert("RGB")
 
-
 def pil_to_b64(img: Image.Image, fmt: str = "PNG") -> str:
     buf = io.BytesIO()
     img.save(buf, format=fmt)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
-
 
 def latest_epoch(ckpt_folder: str) -> int:
     epochs = [
@@ -154,7 +147,6 @@ def latest_epoch(ckpt_folder: str) -> int:
     if not epochs:
         raise FileNotFoundError(f"No checkpoints found in {ckpt_folder}")
     return max(epochs)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CIR model loading
@@ -186,7 +178,6 @@ def load_cir_model(ckpt_folder: str, objects: list, epoch: int, device):
 
     return model, contrastive_loss_fn, year_loss_fn, avlabels
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # OWLv2 – object detection
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,7 +191,6 @@ def load_owlv2(device):
     model.eval()
     print("  OWLv2 ready.")
     return processor, model
-
 
 def run_owlv2(pil_img, objects, processor, owl_model, device, threshold=OWL_THRESHOLD):
     texts  = [[f"a photo of a {obj.lower()}" for obj in objects]]
@@ -228,7 +218,6 @@ def run_owlv2(pil_img, objects, processor, owl_model, device, threshold=OWL_THRE
         })
     return detections
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SAM2 – segmentation
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,7 +233,6 @@ def load_sam2(device):
     print("  SAM2 ready.")
     return processor, model
 
-
 def run_sam2_on_box(
     pil_img: Image.Image,
     box_xyxy: list,
@@ -252,13 +240,8 @@ def run_sam2_on_box(
     sam_model,
     device,
 ) -> np.ndarray:
-    """
-    Run SAM2 with a single bounding-box prompt.
-    Returns a boolean mask of shape (H, W).
-    Falls back to the filled rectangle if SAM2 raises an exception.
-    """
     try:
-        input_boxes = [[box_xyxy]]  # 3 levels: [image, box_list, coords]
+        input_boxes = [[box_xyxy]]
         inputs = sam_processor(
             images=pil_img,
             input_boxes=input_boxes,
@@ -272,12 +255,11 @@ def run_sam2_on_box(
             else:
                 outputs = sam_model(**inputs)
 
-        # Skip post_process_masks; upsample raw logits manually
-        pred = outputs.pred_masks  # (1, 1, n_candidates, H', W')
-        pred = pred[0, 0]          # (n_candidates, H', W')
+        pred = outputs.pred_masks
+        pred = pred[0, 0]
 
         best = int(torch.stack([m.sigmoid().sum() for m in pred]).argmax().item())
-        logits = pred[best].unsqueeze(0).unsqueeze(0).float()  # (1,1,H',W')
+        logits = pred[best].unsqueeze(0).unsqueeze(0).float()
 
         logits_up = torch.nn.functional.interpolate(
             logits,
@@ -295,7 +277,6 @@ def run_sam2_on_box(
         mask[max(y1,0):min(y2,pil_img.height), max(x1,0):min(x2,pil_img.width)] = True
         return mask
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CIR inference
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,7 +286,6 @@ def embed_crop(crop_pil: Image.Image, model, device) -> torch.Tensor:
     with torch.inference_mode():
         emb, _ = model(tensor, None)
     return emb.squeeze(0).cpu()
-
 
 def infer_proxy(
     emb: torch.Tensor,
@@ -321,9 +301,8 @@ def infer_proxy(
 
     return cat_idx, year_idx
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Visualisation – clean masks only, no boxes or text
+# Visualisation & Encoding
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_overlay(
@@ -351,17 +330,7 @@ def build_overlay(
 
     return Image.fromarray(result.clip(0, 255).astype(np.uint8))
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Mask encoding for interactive canvas
-# ─────────────────────────────────────────────────────────────────────────────
-
 def encode_mask_rle(mask: np.ndarray) -> dict:
-    """
-    Encode a boolean (H, W) mask as a run-length encoded dict for JSON transfer.
-    Returns { "shape": [H, W], "runs": [start, length, start, length, ...] }
-    where indices are into the flattened row-major array.
-    """
     flat = mask.flatten().astype(np.uint8)
     runs = []
     i = 0
@@ -461,7 +430,6 @@ HTML = """<!DOCTYPE html>
   }
   #status.err { color: #ff6b6b; }
 
-  /* ── static overlays ── */
   .results {
     width: 100%; max-width: 1100px;
     margin: 2rem auto 0; padding: 0 1.5rem;
@@ -474,7 +442,6 @@ HTML = """<!DOCTYPE html>
   }
   .panel img { width: 100%; border-radius: 8px; border: 1px solid var(--line); display: block; }
 
-  /* ── legend ── */
   .legend {
     display: flex;
     flex-wrap: wrap;
@@ -498,7 +465,6 @@ HTML = """<!DOCTYPE html>
     flex-shrink: 0;
   }
 
-  /* ── interactive canvas section ── */
   .interactive-section {
     width: 100%; max-width: 1100px;
     margin: 2.5rem auto 3rem; padding: 0 1.5rem;
@@ -529,7 +495,8 @@ HTML = """<!DOCTYPE html>
     width: 100%;
     height: auto;
   }
-  /* tooltip */
+  
+  /* tooltip styling expanded for similar images */
   #tooltip {
     position: fixed;
     pointer-events: none;
@@ -548,8 +515,11 @@ HTML = """<!DOCTYPE html>
   #tooltip .tt-row   { display: flex; align-items: center; gap: .4rem; color: var(--dim); }
   #tooltip .tt-val   { color: var(--txt); }
   #tooltip .tt-swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+  
+  #tooltip .tt-similar { display: flex; gap: 4px; margin-top: 6px; }
+  #tooltip .tt-similar img { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); }
+  .tt-loading { font-size: .65rem; color: var(--dim); margin-top: 4px; }
 
-  /* mode toggle */
   .mode-toggle {
     display: flex; gap: .4rem; margin-bottom: .75rem;
   }
@@ -591,7 +561,7 @@ HTML = """<!DOCTYPE html>
 
 <header>
   <h1>CIR · Segment &amp; Date</h1>
-  <span class="sub">OWLv2 detection → SAM2 mask → proxy-based category &amp; year inference</span>
+  <span class="sub">OWLv2 detection → SAM2 mask → proxy-based inference &amp; Annoy lookup</span>
 </header>
 
 <div class="controls">
@@ -607,10 +577,8 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div id="status">Upload an image to begin.</div>
-
 <div class="detections" id="chips"></div>
 
-<!-- ── static overlays ── -->
 <div class="results" id="results" style="display:none">
   <div class="panel">
     <span class="panel-title">Category overlay</span>
@@ -624,11 +592,10 @@ HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- ── interactive hover canvas ── -->
 <div class="interactive-section" id="interactiveSection" style="display:none">
   <div class="interactive-header">
     Interactive explorer
-    <span class="badge">hover to inspect regions</span>
+    <span class="badge">hover to inspect regions &amp; fetch similar</span>
   </div>
   <div class="mode-toggle">
     <button class="mode-btn active" id="btnCat"  onclick="setMode('category')">Category colours</button>
@@ -639,7 +606,6 @@ HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- tooltip -->
 <div id="tooltip">
   <div class="tt-label" id="ttLabel"></div>
   <div class="tt-row">
@@ -652,21 +618,20 @@ HTML = """<!DOCTYPE html>
     <span style="color:var(--dim)">year&nbsp;</span>
     <span class="tt-val" id="ttYear"></span>
   </div>
+  <div id="ttSimilar" class="tt-similar"></div>
 </div>
 
 <script>
-/* ── state ─────────────────────────────────────────────────────────── */
 let imageB64    = null;
-let analysisData = null;   // full JSON response from /analyse
+let analysisData = null;
 let canvasMode  = 'category';
-
-/* decoded masks: array of { mask: Uint8Array, shape:[H,W], cat_idx, year_idx, label, cat_color, year_color } */
 let decodedMasks = [];
-
-/* per-pixel lookup: Int32Array of length H*W, value = detection index (-1 = background) */
 let pixelIndex  = null;
 
-/* ── file handling ──────────────────────────────────────────────────── */
+let activeHoverIdx = -1;
+let hoverAbortController = null;
+let similarCache = {};
+
 const fileInput = document.getElementById('fileInput');
 const dropzone  = document.getElementById('dropzone');
 const preview   = document.getElementById('preview');
@@ -697,13 +662,14 @@ function loadFile(file) {
   reader.readAsDataURL(file);
 }
 
-/* ── analyse ────────────────────────────────────────────────────────── */
 async function run() {
   if (!imageB64) return;
   setLoading(true);
   document.getElementById('results').style.display = 'none';
   document.getElementById('interactiveSection').style.display = 'none';
   document.getElementById('chips').innerHTML = '';
+  similarCache = {};
+  activeHoverIdx = -1;
   setStatus('Running OWLv2 + SAM2 + CIR …');
 
   try {
@@ -716,17 +682,13 @@ async function run() {
     if (data.error) { setStatus('❌ ' + data.error, true); return; }
 
     analysisData = data;
-
-    /* static overlays */
     document.getElementById('catImg').src  = 'data:image/png;base64,' + data.category_img_b64;
     document.getElementById('yearImg').src = 'data:image/png;base64,' + data.year_img_b64;
     document.getElementById('results').style.display = 'grid';
 
-    /* legends */
     buildLegend('legendCat',  data.legend_cat);
     buildLegend('legendYear', data.legend_year);
 
-    /* detection chips */
     const chips = document.getElementById('chips');
     (data.detections || []).forEach(d => {
       const chip = document.createElement('span');
@@ -738,10 +700,8 @@ async function run() {
       chips.appendChild(chip);
     });
 
-    /* interactive canvas */
     initInteractive(data);
     document.getElementById('interactiveSection').style.display = 'block';
-
     setStatus(`Done in ${data.elapsed_ms} ms · ${data.detections.length} object(s) detected.`);
   } catch (err) {
     setStatus('❌ ' + err, true);
@@ -750,7 +710,6 @@ async function run() {
   }
 }
 
-/* ── legend builder ─────────────────────────────────────────────────── */
 function buildLegend(containerId, items) {
   const el = document.getElementById(containerId);
   el.innerHTML = '';
@@ -762,7 +721,6 @@ function buildLegend(containerId, items) {
   });
 }
 
-/* ── interactive canvas ─────────────────────────────────────────────── */
 function decodeRle(rle) {
   const [H, W] = rle.shape;
   const flat = new Uint8Array(H * W);
@@ -775,7 +733,6 @@ function decodeRle(rle) {
 }
 
 function parseColor(cssRgb) {
-  /* "rgb(r,g,b)" → [r,g,b] */
   const m = cssRgb.match(/(\d+),\s*(\d+),\s*(\d+)/);
   return m ? [+m[1], +m[2], +m[3]] : [128, 128, 128];
 }
@@ -784,15 +741,14 @@ function initInteractive(data) {
   const canvas = document.getElementById('hoverCanvas');
   decodedMasks = [];
 
-  /* decode all RLE masks */
   data.mask_data.forEach((md, i) => {
     const { mask, H, W } = decodeRle(md.rle);
     decodedMasks.push({
-      mask,
-      H, W,
+      mask, H, W,
       cat_idx:    md.cat_idx,
       year_idx:   md.year_idx,
       label:      md.label,
+      embedding:  md.embedding,
       cat_color:  parseColor(data.legend_cat[md.cat_idx].color),
       year_color: parseColor(data.legend_year[md.year_idx] ? data.legend_year[md.year_idx].color : 'rgb(128,128,128)'),
     });
@@ -805,7 +761,6 @@ function initInteractive(data) {
   canvas.width  = W;
   canvas.height = H;
 
-  /* build per-pixel index: last mask wins (painter's algo) */
   pixelIndex = new Int32Array(H * W).fill(-1);
   decodedMasks.forEach((dm, i) => {
     for (let p = 0; p < dm.mask.length; p++) {
@@ -815,12 +770,12 @@ function initInteractive(data) {
 
   drawCanvas('category');
 
-  /* mouse move handler */
   const wrap = document.getElementById('canvasWrap');
   wrap.addEventListener('mousemove', onCanvasMove);
   wrap.addEventListener('mouseleave', () => {
     document.getElementById('tooltip').style.display = 'none';
-    drawCanvas(canvasMode);   // remove highlight
+    activeHoverIdx = -1;
+    drawCanvas(canvasMode);
   });
 }
 
@@ -833,15 +788,8 @@ function drawCanvas(mode, highlightIdx = -1) {
   const imgData = ctx.createImageData(W, H);
   const buf     = imgData.data;
 
-  /* draw source image first (encoded as PNG in the response) */
-  /* We'll composite masks over a grey base; the base image is re-drawn via offscreen */
-  /* Use the already-displayed static overlay as reference? No – redraw from scratch.   */
-  /* Strategy: draw base (src image pixels) + alpha-blend masks on top.                */
-  /* The src image is available as imageB64 – decode via offscreen canvas.              */
-
-  const src = window.__srcPixels;   // set once on first draw
+  const src = window.__srcPixels;
   if (!src) {
-    /* async: decode image then redraw */
     const img = new window.Image();
     img.onload = () => {
       const off = document.createElement('canvas');
@@ -879,11 +827,9 @@ function drawCanvas(mode, highlightIdx = -1) {
 
   ctx.putImageData(imgData, 0, 0);
 
-  /* outline highlight */
   if (highlightIdx >= 0) {
     const dm  = decodedMasks[highlightIdx];
     const col = mode === 'category' ? dm.cat_color : dm.year_color;
-    /* draw 1px bright border around bounding box of the mask */
     let minX = canvas.width, maxX = 0, minY = canvas.height, maxY = 0;
     for (let p = 0; p < dm.mask.length; p++) {
       if (!dm.mask[p]) continue;
@@ -914,21 +860,19 @@ function onCanvasMove(e) {
 
   const p  = cy * canvas.width + cx;
   const di = pixelIndex[p];
-
   const tt = document.getElementById('tooltip');
 
   if (di < 0) {
     tt.style.display = 'none';
+    activeHoverIdx = -1;
     drawCanvas(canvasMode);
     return;
   }
 
   const dm = decodedMasks[di];
 
-  /* redraw with highlight */
   drawCanvas(canvasMode, di);
 
-  /* position tooltip */
   tt.style.display = 'block';
   const ttW = tt.offsetWidth  || 140;
   const ttH = tt.offsetHeight || 70;
@@ -942,11 +886,56 @@ function onCanvasMove(e) {
   const catCol  = `rgb(${dm.cat_color.join(',')})`;
   const yearCol = `rgb(${dm.year_color.join(',')})`;
 
-  document.getElementById('ttLabel').textContent          = dm.label;
-  document.getElementById('ttCat').textContent            = dm.label;
-  document.getElementById('ttCatSwatch').style.background = catCol;
+  document.getElementById('ttLabel').textContent           = dm.label;
+  document.getElementById('ttCat').textContent             = dm.label;
+  document.getElementById('ttCatSwatch').style.background  = catCol;
   document.getElementById('ttYear').textContent            = 'yr ' + dm.year_idx;
   document.getElementById('ttYearSwatch').style.background = yearCol;
+
+  // Render top 5 Similar dynamically
+  if (activeHoverIdx !== di) {
+    activeHoverIdx = di;
+    const simContainer = document.getElementById('ttSimilar');
+    simContainer.innerHTML = '';
+    
+    if (dm.embedding) {
+      if (similarCache[di]) {
+        renderSimilar(similarCache[di], simContainer);
+      } else {
+        simContainer.innerHTML = '<div class="tt-loading">Loading similar images...</div>';
+        if (hoverAbortController) hoverAbortController.abort();
+        hoverAbortController = new AbortController();
+        
+        fetch('/similar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ embedding: dm.embedding }),
+          signal: hoverAbortController.signal
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.results) {
+            similarCache[di] = data.results;
+            if (activeHoverIdx === di) {
+              renderSimilar(data.results, simContainer);
+            }
+          }
+        }).catch(err => {
+          if (err.name !== 'AbortError') console.error(err);
+        });
+      }
+    }
+  }
+}
+
+function renderSimilar(results, container) {
+  container.innerHTML = '';
+  results.forEach(r => {
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + r.b64;
+    img.title = `${r.category} (yr ${r.year_idx})`;
+    container.appendChild(img);
+  });
 }
 
 function setMode(mode) {
@@ -956,7 +945,6 @@ function setMode(mode) {
   drawCanvas(mode);
 }
 
-/* ── utils ──────────────────────────────────────────────────────────── */
 function setLoading(on) {
   document.getElementById('spin').style.display = on ? 'inline-block' : 'none';
   runBtn.disabled = on;
@@ -983,6 +971,9 @@ def create_app(
     owl_processor, owl_model,
     sam_processor, sam_model,
     device,
+    ann=None,            # NEW
+    meta=None,           # NEW
+    is_there_db=False,   # NEW
 ):
     app     = Flask(__name__)
     n_years = year_proxies.shape[0]
@@ -1017,16 +1008,19 @@ def create_app(
 
             if (x2 - x1) < 8 or (y2 - y1) < 8:
                 cat_idx, year_idx = 0, 0
+                emb_list = None
             else:
                 crop = pil_img.crop((x1, y1, x2, y2))
                 emb  = embed_crop(crop, model, device)
                 cat_idx, year_idx = infer_proxy(emb, cat_proxies, year_proxies)
+                emb_list = emb.tolist() if is_there_db else None # Support lightweight mode fallback
 
             enriched.append({
                 **det,
                 "mask":     mask,
                 "cat_idx":  cat_idx,
                 "year_idx": year_idx,
+                "embedding": emb_list,
             })
 
         # ── 3. Build overlays ─────────────────────────────────────────────────
@@ -1052,10 +1046,11 @@ def create_app(
         # ── 5. Mask data for interactive canvas ───────────────────────────────
         mask_data = [
             {
-                "rle":      encode_mask_rle(d["mask"]),
-                "cat_idx":  d["cat_idx"],
-                "year_idx": d["year_idx"],
-                "label":    d["label"],
+                "rle":       encode_mask_rle(d["mask"]),
+                "cat_idx":   d["cat_idx"],
+                "year_idx":  d["year_idx"],
+                "label":     d["label"],
+                "embedding": d["embedding"], # Sent back directly for JS fetch API calls
             }
             for d in enriched
         ]
@@ -1080,6 +1075,19 @@ def create_app(
             "legend_year":      legend_year,
             "mask_data":        mask_data,
         })
+        
+    @app.route("/similar", methods=["POST"])
+    def similar():
+        if not is_there_db:
+            return jsonify({"error": "No Annoy database available"}), 400
+        body = request.get_json()
+        if not body or "embedding" not in body:
+            return jsonify({"error": "Missing embedding array"}), 400
+            
+        emb_tensor = torch.tensor(body["embedding"], dtype=torch.float32)
+        results, _ = _run_ann(ann, meta, emb_tensor, k=5)
+        
+        return jsonify({"results": results})
 
     return app
 
@@ -1114,8 +1122,6 @@ def main():
     model, contrastive_loss_fn, year_loss_fn, avlabels = load_cir_model(
         args.ckpt_folder, args.objects, epoch, device
     )
-
-
     
     is_there_db, (ann, meta) = build_annoy_index(args.objects, args.ckpt_folder, epoch, device)
 
@@ -1137,6 +1143,9 @@ def main():
         sam_processor = sam_processor,
         sam_model     = sam_model,
         device        = device,
+        ann           = ann,
+        meta          = meta,
+        is_there_db   = is_there_db,
     )
 
     print(f"\n🚀  http://0.0.0.0:{args.port}\n")
