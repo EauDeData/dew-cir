@@ -31,7 +31,7 @@ import os
 import re
 import time
 import json
-import annoy 
+from annoy import AnnoyIndex
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.cm as cm
