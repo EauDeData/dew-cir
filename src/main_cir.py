@@ -2,7 +2,7 @@ import argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import random_split, DataLoader
-
+import json
 from train_experts_dataloader import SpecialistDataloaderWithClass, tqdm
 from models import SpecialistModel, ConditionedToYear
 from core_datautils import df as data_complete
@@ -46,6 +46,9 @@ def save_checkpoint(model, contrastive_loss_fn, year_loss_fn, epoch, args):
     torch.save(model.state_dict(),                f"{save_dir}/model_epoch{epoch}.pth")
     torch.save(contrastive_loss_fn.state_dict(),  f"{save_dir}/contrastive_loss_epoch{epoch}.pth")
     torch.save(year_loss_fn.state_dict(),         f"{save_dir}/year_loss_epoch{epoch}.pth")
+    with open( f"{save_dir}/args.json", 'w') as fh:
+        json.dump(vars(args), fh, indent = 10)
+
 
     print(f"Checkpoint saved to {save_dir}")
 

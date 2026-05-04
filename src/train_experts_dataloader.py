@@ -7,7 +7,7 @@ import os
 PER_IMAGE_OBJECTS_PATH = './objects2img_complete.json'
 PER_IMAGE_TEST_PATH = '/home/amolina/DEWGraph/src/objects2image_test.json'
 class ObjectSpecificDateLoader(torch.utils.data.Dataset):
-    def __init__(self, df, object: str, transforms, min_date = 1930, max_date = 1999, freq = 10, evaluate = False):
+    def __init__(self, df, object: str, transforms, min_date = 1930, max_date = 1999, freq = 5, evaluate = False):
         super().__init__()
 
         with open(PER_IMAGE_OBJECTS_PATH if not evaluate else PER_IMAGE_TEST_PATH, 'r') as f:
@@ -116,7 +116,7 @@ class SpecialistDataloaderWithClass(ObjectSpecificDateLoader):
         year = data['year']
 
         # Aquí fem per dècada perque si no tindrem molts pocs samples
-        return self.es_trans(crop), self.available_labels.index(year - (year % 10)), self.category
+        return self.es_trans(crop), self.available_labels.index(year - (year % self.freq)), self.category
 
     def __getitem__(self, item):
         image_A, condition_B, category = self.get_one_sample(item)
