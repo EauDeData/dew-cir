@@ -10,7 +10,7 @@ Upload an image via browser →
        • Left  – masks coloured by inferred CATEGORY  (+ legend)
        • Right – masks coloured by inferred YEAR       (+ legend)
        • Below – interactive canvas: hover a region to see category + year tooltip
-       • (NEW) Hovering will ping the server with the crop embedding to show top 5 similar images
+       • Clicking a region opens a side panel with top 5 similar images
 
 Dependencies:
     pip install -U transformers accelerate flask pillow matplotlib torch torchvision pytorch-metric-learning annoy
@@ -58,6 +58,9 @@ OVERLAY_ALPHA  = 0.60
 OUTLINE_WIDTH  = 2
 SAM2_MODEL_ID  = "facebook/sam2.1-hiera-small"
 
+YEAR_BASE      = 1930   # year_idx 0 → 1930
+YEAR_STEP      = 5      # each index step = 5 years
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
@@ -90,6 +93,10 @@ def _year_to_rgb(year_idx: int, n_years: int) -> tuple:
     rgb = cm.plasma(t)[:3]
     return tuple(int(c * 255) for c in rgb)
 
+def idx_to_year(idx: int) -> int:
+    """Convert a year index to an absolute calendar year."""
+    return YEAR_BASE + idx * YEAR_STEP
+
 
 def build_annoy_index(
     objects: list,
@@ -117,10 +124,12 @@ def _run_ann(ann, meta, query_vec: torch.Tensor, k = 5):
     results = []
     for idx, dist in zip(indices, distances):
         m = meta.get(str(idx), {})
+        raw_year_idx = m.get("year_idx", -1)
         results.append({
             "b64":      m.get("b64", ""),
             "category": m.get("category", "?"),
-            "year_idx": m.get("year_idx", -1),
+            "year_idx": raw_year_idx,
+            "year":     idx_to_year(raw_year_idx) if raw_year_idx >= 0 else "?",
             "dist":     float(dist),
         })
     return results, F.normalize(query_vec, p=2, dim=0)
@@ -465,6 +474,7 @@ HTML = """<!DOCTYPE html>
     flex-shrink: 0;
   }
 
+  /* ── Interactive section ── */
   .interactive-section {
     width: 100%; max-width: 1100px;
     margin: 2.5rem auto 3rem; padding: 0 1.5rem;
@@ -481,10 +491,16 @@ HTML = """<!DOCTYPE html>
     border-radius: 4px; padding: .15rem .4rem; letter-spacing: 0;
     text-transform: none;
   }
+
+  /* canvas + side panel layout */
+  .explorer-layout {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+  }
   .canvas-wrap {
     position: relative;
-    display: inline-block;
-    width: 100%;
+    flex: 1 1 0;
     border-radius: 8px;
     overflow: hidden;
     border: 1px solid var(--line);
@@ -495,8 +511,96 @@ HTML = """<!DOCTYPE html>
     width: 100%;
     height: auto;
   }
-  
-  /* tooltip styling expanded for similar images */
+
+  /* ── Similar-images side panel ── */
+  #similarPanel {
+    width: 240px;
+    flex-shrink: 0;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    display: none;          /* shown via JS */
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #similarPanel.visible { display: flex; }
+  .sim-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .6rem .75rem .5rem;
+    border-bottom: 1px solid var(--line);
+    font-family: 'Syne', sans-serif; font-weight: 700; font-size: .72rem;
+    color: var(--acc2); letter-spacing: .08em; text-transform: uppercase;
+  }
+  .sim-header .sim-close {
+    cursor: pointer; color: var(--dim); font-size: .85rem;
+    line-height: 1; background: none; border: none; padding: 0;
+    font-family: monospace; font-weight: 400;
+    transition: color .15s;
+    transform: none;
+    opacity: 1;
+  }
+  .sim-header .sim-close:hover { color: var(--txt); opacity:1; transform:none; }
+  .sim-region-label {
+    padding: .4rem .75rem;
+    font-size: .66rem; color: var(--dim);
+    border-bottom: 1px solid var(--line);
+  }
+  .sim-region-label span { color: var(--acc); }
+  .sim-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: .5rem;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+  }
+  .sim-card {
+    display: flex;
+    gap: .55rem;
+    align-items: flex-start;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: .4rem .5rem;
+  }
+  .sim-card img {
+    width: 58px; height: 58px;
+    object-fit: cover;
+    border-radius: 4px;
+    flex-shrink: 0;
+    border: 1px solid var(--line);
+  }
+  .sim-card-info {
+    display: flex;
+    flex-direction: column;
+    gap: .18rem;
+    min-width: 0;
+  }
+  .sim-card-cat {
+    font-family: 'Syne', sans-serif; font-weight: 700;
+    font-size: .7rem; color: var(--acc);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .sim-card-year {
+    font-size: .68rem; color: var(--acc2);
+  }
+  .sim-card-dist {
+    font-size: .62rem; color: var(--dim);
+  }
+  .sim-loading {
+    padding: .75rem;
+    font-size: .68rem; color: var(--dim);
+    text-align: center;
+  }
+  .sim-empty {
+    padding: .75rem;
+    font-size: .68rem; color: var(--dim);
+    text-align: center;
+  }
+
+  /* ── hover tooltip ── */
   #tooltip {
     position: fixed;
     pointer-events: none;
@@ -515,8 +619,8 @@ HTML = """<!DOCTYPE html>
   #tooltip .tt-row   { display: flex; align-items: center; gap: .4rem; color: var(--dim); }
   #tooltip .tt-val   { color: var(--txt); }
   #tooltip .tt-swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
-  
-  #tooltip .tt-similar { display: flex; gap: 4px; margin-top: 6px; }
+  #tooltip .tt-hint  { margin-top: .3rem; font-size: .6rem; color: var(--dim); font-style: italic; }
+  #tooltip .tt-similar { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
   #tooltip .tt-similar img { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); }
   .tt-loading { font-size: .65rem; color: var(--dim); margin-top: 4px; }
 
@@ -595,17 +699,34 @@ HTML = """<!DOCTYPE html>
 <div class="interactive-section" id="interactiveSection" style="display:none">
   <div class="interactive-header">
     Interactive explorer
-    <span class="badge">hover to inspect regions &amp; fetch similar</span>
+    <span class="badge">hover to inspect · click to find similar</span>
   </div>
   <div class="mode-toggle">
     <button class="mode-btn active" id="btnCat"  onclick="setMode('category')">Category colours</button>
     <button class="mode-btn"        id="btnYear" onclick="setMode('year')">Year colours</button>
   </div>
-  <div class="canvas-wrap" id="canvasWrap">
-    <canvas id="hoverCanvas"></canvas>
+
+  <div class="explorer-layout">
+    <!-- left: interactive canvas -->
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="hoverCanvas"></canvas>
+    </div>
+
+    <!-- right: similar-images panel (hidden until a region is clicked) -->
+    <div id="similarPanel">
+      <div class="sim-header">
+        Similar objects
+        <button class="sim-close" onclick="closeSimilarPanel()" title="Close">✕</button>
+      </div>
+      <div class="sim-region-label" id="simRegionLabel">—</div>
+      <div class="sim-body" id="simBody">
+        <div class="sim-empty">Click a region on the canvas to explore similar objects.</div>
+      </div>
+    </div>
   </div>
 </div>
 
+<!-- hover tooltip -->
 <div id="tooltip">
   <div class="tt-label" id="ttLabel"></div>
   <div class="tt-row">
@@ -619,18 +740,25 @@ HTML = """<!DOCTYPE html>
     <span class="tt-val" id="ttYear"></span>
   </div>
   <div id="ttSimilar" class="tt-similar"></div>
+  <div class="tt-hint">Click to pin &amp; explore →</div>
 </div>
 
 <script>
-let imageB64    = null;
-let analysisData = null;
-let canvasMode  = 'category';
-let decodedMasks = [];
-let pixelIndex  = null;
+// ── year conversion (mirrors Python) ─────────────────────────────────────────
+const YEAR_BASE = {{ year_base }};
+const YEAR_STEP = {{ year_step }};
+function idxToYear(idx) { return YEAR_BASE + idx * YEAR_STEP; }
 
+// ── state ─────────────────────────────────────────────────────────────────────
+let imageB64      = null;
+let analysisData  = null;
+let canvasMode    = 'category';
+let decodedMasks  = [];
+let pixelIndex    = null;
+let activeClickIdx = -1;
 let activeHoverIdx = -1;
 let hoverAbortController = null;
-let similarCache = {};
+let similarCache  = {};
 
 const fileInput = document.getElementById('fileInput');
 const dropzone  = document.getElementById('dropzone');
@@ -668,7 +796,9 @@ async function run() {
   document.getElementById('results').style.display = 'none';
   document.getElementById('interactiveSection').style.display = 'none';
   document.getElementById('chips').innerHTML = '';
-  similarCache = {};
+  closeSimilarPanel();
+  similarCache   = {};
+  activeClickIdx = -1;
   activeHoverIdx = -1;
   setStatus('Running OWLv2 + SAM2 + CIR …');
 
@@ -696,7 +826,7 @@ async function run() {
       chip.innerHTML =
         `<span class="cat">${d.label}</span> ` +
         `score <span class="yr">${d.score.toFixed(2)}</span> · ` +
-        `yr <span class="yr">${d.year_idx}</span>`;
+        `year <span class="yr">${idxToYear(d.year_idx)}</span>`;
       chips.appendChild(chip);
     });
 
@@ -721,6 +851,7 @@ function buildLegend(containerId, items) {
   });
 }
 
+// ── RLE helpers ───────────────────────────────────────────────────────────────
 function decodeRle(rle) {
   const [H, W] = rle.shape;
   const flat = new Uint8Array(H * W);
@@ -733,15 +864,17 @@ function decodeRle(rle) {
 }
 
 function parseColor(cssRgb) {
-  const m = cssRgb.match(/(\d+),\s*(\d+),\s*(\d+)/);
+  const m = cssRgb.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);
   return m ? [+m[1], +m[2], +m[3]] : [128, 128, 128];
 }
 
+// ── Interactive canvas init ───────────────────────────────────────────────────
 function initInteractive(data) {
   const canvas = document.getElementById('hoverCanvas');
   decodedMasks = [];
+  window.__srcPixels = null; // reset source pixel cache
 
-  data.mask_data.forEach((md, i) => {
+  data.mask_data.forEach((md) => {
     const { mask, H, W } = decodeRle(md.rle);
     decodedMasks.push({
       mask, H, W,
@@ -774,11 +907,12 @@ function initInteractive(data) {
   wrap.addEventListener('mousemove', onCanvasMove);
   wrap.addEventListener('mouseleave', () => {
     document.getElementById('tooltip').style.display = 'none';
-    activeHoverIdx = -1;
-    drawCanvas(canvasMode);
+    drawCanvas(canvasMode, activeClickIdx); // keep click highlight
   });
+  wrap.addEventListener('click', onCanvasClick);
 }
 
+// ── Canvas rendering ──────────────────────────────────────────────────────────
 function drawCanvas(mode, highlightIdx = -1) {
   const canvas = document.getElementById('hoverCanvas');
   const ctx    = canvas.getContext('2d');
@@ -803,8 +937,8 @@ function drawCanvas(mode, highlightIdx = -1) {
     return;
   }
 
-  const ALPHA = 0.55;
-  const HI_ALPHA = 0.80;
+  const ALPHA    = 0.55;
+  const HI_ALPHA = 0.82;
 
   for (let p = 0; p < H * W; p++) {
     const b = p * 4;
@@ -827,6 +961,7 @@ function drawCanvas(mode, highlightIdx = -1) {
 
   ctx.putImageData(imgData, 0, 0);
 
+  // Draw bounding outline for highlighted region
   if (highlightIdx >= 0) {
     const dm  = decodedMasks[highlightIdx];
     const col = mode === 'category' ? dm.cat_color : dm.year_color;
@@ -838,14 +973,15 @@ function drawCanvas(mode, highlightIdx = -1) {
       if (y < minY) minY = y; if (y > maxY) maxY = y;
     }
     ctx.strokeStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
-    ctx.lineWidth   = 2;
+    ctx.lineWidth   = 2.5;
     ctx.shadowColor = '#000';
-    ctx.shadowBlur  = 4;
+    ctx.shadowBlur  = 5;
     ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
     ctx.shadowBlur  = 0;
   }
 }
 
+// ── Hover: tooltip only ───────────────────────────────────────────────────────
 function onCanvasMove(e) {
   const canvas = document.getElementById('hoverCanvas');
   if (!pixelIndex || !canvas) return;
@@ -864,18 +1000,18 @@ function onCanvasMove(e) {
 
   if (di < 0) {
     tt.style.display = 'none';
-    activeHoverIdx = -1;
-    drawCanvas(canvasMode);
+    drawCanvas(canvasMode, activeClickIdx);
     return;
   }
 
   const dm = decodedMasks[di];
-
+  // Highlight hovered region (keep click highlight only if same)
   drawCanvas(canvasMode, di);
 
+  // Position tooltip
   tt.style.display = 'block';
-  const ttW = tt.offsetWidth  || 140;
-  const ttH = tt.offsetHeight || 70;
+  const ttW = tt.offsetWidth  || 150;
+  const ttH = tt.offsetHeight || 80;
   let tx = e.clientX + 16;
   let ty = e.clientY - 8;
   if (tx + ttW > window.innerWidth  - 8) tx = e.clientX - ttW - 16;
@@ -889,62 +1025,166 @@ function onCanvasMove(e) {
   document.getElementById('ttLabel').textContent           = dm.label;
   document.getElementById('ttCat').textContent             = dm.label;
   document.getElementById('ttCatSwatch').style.background  = catCol;
-  document.getElementById('ttYear').textContent            = 'yr ' + dm.year_idx;
+  document.getElementById('ttYear').textContent            = idxToYear(dm.year_idx);
   document.getElementById('ttYearSwatch').style.background = yearCol;
 
-  // Render top 5 Similar dynamically
+  // ── Hover similar: fetch & show thumbnails in tooltip ──────────────────────
   if (activeHoverIdx !== di) {
     activeHoverIdx = di;
     const simContainer = document.getElementById('ttSimilar');
     simContainer.innerHTML = '';
-    
+
     if (dm.embedding) {
       if (similarCache[di]) {
-        renderSimilar(similarCache[di], simContainer);
+        renderTooltipSimilar(similarCache[di], simContainer);
       } else {
-        simContainer.innerHTML = '<div class="tt-loading">Loading similar images...</div>';
+        simContainer.innerHTML = '<div class="tt-loading">Loading similar…</div>';
         if (hoverAbortController) hoverAbortController.abort();
         hoverAbortController = new AbortController();
-        
+
         fetch('/similar', {
-          method: 'POST',
+          method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ embedding: dm.embedding }),
-          signal: hoverAbortController.signal
+          body:    JSON.stringify({ embedding: dm.embedding }),
+          signal:  hoverAbortController.signal,
         })
         .then(res => res.json())
         .then(data => {
           if (data.results) {
             similarCache[di] = data.results;
             if (activeHoverIdx === di) {
-              renderSimilar(data.results, simContainer);
+              renderTooltipSimilar(data.results, simContainer);
             }
           }
-        }).catch(err => {
-          if (err.name !== 'AbortError') console.error(err);
-        });
+        })
+        .catch(err => { if (err.name !== 'AbortError') console.error(err); });
       }
     }
   }
 }
 
-function renderSimilar(results, container) {
+// ── Click: open similar panel ─────────────────────────────────────────────────
+function onCanvasClick(e) {
+  const canvas = document.getElementById('hoverCanvas');
+  if (!pixelIndex || !canvas) return;
+
+  const rect   = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const cx     = Math.floor((e.clientX - rect.left)  * scaleX);
+  const cy     = Math.floor((e.clientY - rect.top)   * scaleY);
+
+  const p  = cy * canvas.width + cx;
+  const di = pixelIndex[p];
+
+  if (di < 0) return; // clicked background – do nothing
+
+  activeClickIdx = di;
+  drawCanvas(canvasMode, di);
+  openSimilarPanel(di);
+}
+
+function openSimilarPanel(di) {
+  const dm     = decodedMasks[di];
+  const panel  = document.getElementById('similarPanel');
+  const label  = document.getElementById('simRegionLabel');
+  const body   = document.getElementById('simBody');
+
+  label.innerHTML =
+    `<span>${dm.label}</span> &nbsp;·&nbsp; ` +
+    `year <span style="color:var(--acc2)">${idxToYear(dm.year_idx)}</span>`;
+
+  panel.classList.add('visible');
+
+  // Serve from cache if available
+  if (similarCache[di]) {
+    renderSimilarCards(similarCache[di], body);
+    return;
+  }
+
+  if (!dm.embedding) {
+    body.innerHTML = '<div class="sim-empty">No embedding available for this region.</div>';
+    return;
+  }
+
+  body.innerHTML = '<div class="sim-loading">Fetching similar images…</div>';
+
+  fetch('/similar', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ embedding: dm.embedding }),
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.error) {
+      body.innerHTML = `<div class="sim-empty">${data.error}</div>`;
+      return;
+    }
+    similarCache[di] = data.results;
+    renderSimilarCards(data.results, body);
+  })
+  .catch(err => {
+    body.innerHTML = `<div class="sim-empty">Error: ${err}</div>`;
+  });
+}
+
+function renderSimilarCards(results, container) {
   container.innerHTML = '';
+  if (!results || results.length === 0) {
+    container.innerHTML = '<div class="sim-empty">No similar images found.</div>';
+    return;
+  }
   results.forEach(r => {
+    const card = document.createElement('div');
+    card.className = 'sim-card';
+
     const img = document.createElement('img');
     img.src = 'data:image/png;base64,' + r.b64;
-    img.title = `${r.category} (yr ${r.year_idx})`;
+    img.alt = r.category;
+
+    const info = document.createElement('div');
+    info.className = 'sim-card-info';
+
+    const absYear = (r.year_idx >= 0) ? idxToYear(r.year_idx) : '?';
+    info.innerHTML =
+      `<div class="sim-card-cat">${r.category}</div>` +
+      `<div class="sim-card-year">${absYear}</div>` +
+      `<div class="sim-card-dist">dist ${r.dist.toFixed(3)}</div>`;
+
+    card.appendChild(img);
+    card.appendChild(info);
+    container.appendChild(card);
+  });
+}
+
+function renderTooltipSimilar(results, container) {
+  container.innerHTML = '';
+  if (!results || results.length === 0) return;
+  results.forEach(r => {
+    const img = document.createElement('img');
+    img.src   = 'data:image/png;base64,' + r.b64;
+    const absYear = (r.year_idx >= 0) ? idxToYear(r.year_idx) : '?';
+    img.title = `${r.category} · ${absYear} (dist ${r.dist.toFixed(3)})`;
     container.appendChild(img);
   });
 }
 
+function closeSimilarPanel() {
+  document.getElementById('similarPanel').classList.remove('visible');
+  activeClickIdx = -1;
+  activeHoverIdx = -1;
+  drawCanvas(canvasMode, -1);
+}
+
+// ── Mode toggle ───────────────────────────────────────────────────────────────
 function setMode(mode) {
   canvasMode = mode;
   document.getElementById('btnCat').classList.toggle('active',  mode === 'category');
   document.getElementById('btnYear').classList.toggle('active', mode === 'year');
-  drawCanvas(mode);
+  drawCanvas(mode, activeClickIdx);
 }
 
+// ── Utilities ─────────────────────────────────────────────────────────────────
 function setLoading(on) {
   document.getElementById('spin').style.display = on ? 'inline-block' : 'none';
   runBtn.disabled = on;
@@ -971,16 +1211,23 @@ def create_app(
     owl_processor, owl_model,
     sam_processor, sam_model,
     device,
-    ann=None,            # NEW
-    meta=None,           # NEW
-    is_there_db=False,   # NEW
+    ann=None,
+    meta=None,
+    is_there_db=False,
 ):
     app     = Flask(__name__)
     n_years = year_proxies.shape[0]
 
+    # Inject Python constants into the JS so year conversion is always in sync
+    html_rendered = HTML.replace(
+        "{{ year_base }}", str(YEAR_BASE)
+    ).replace(
+        "{{ year_step }}", str(YEAR_STEP)
+    )
+
     @app.route("/")
     def index():
-        return render_template_string(HTML)
+        return render_template_string(html_rendered)
 
     @app.route("/analyse", methods=["POST"])
     def analyse():
@@ -1013,13 +1260,14 @@ def create_app(
                 crop = pil_img.crop((x1, y1, x2, y2))
                 emb  = embed_crop(crop, model, device)
                 cat_idx, year_idx = infer_proxy(emb, cat_proxies, year_proxies)
-                emb_list = emb.tolist() if is_there_db else None # Support lightweight mode fallback
+                emb_list = emb.tolist() if is_there_db else None
 
             enriched.append({
                 **det,
-                "mask":     mask,
-                "cat_idx":  cat_idx,
-                "year_idx": year_idx,
+                "mask":      mask,
+                "cat_idx":   cat_idx,
+                "year_idx":  year_idx,
+                "year":      idx_to_year(year_idx),   # absolute year in response
                 "embedding": emb_list,
             })
 
@@ -1037,7 +1285,7 @@ def create_app(
         ]
         legend_year = [
             {
-                "label": f"yr {i}",
+                "label": str(idx_to_year(i)),   # absolute year label
                 "color": "rgb({},{},{})".format(*_year_to_rgb(i, n_years))
             }
             for i in range(n_years)
@@ -1049,8 +1297,9 @@ def create_app(
                 "rle":       encode_mask_rle(d["mask"]),
                 "cat_idx":   d["cat_idx"],
                 "year_idx":  d["year_idx"],
+                "year":      d["year"],
                 "label":     d["label"],
-                "embedding": d["embedding"], # Sent back directly for JS fetch API calls
+                "embedding": d["embedding"],
             }
             for d in enriched
         ]
@@ -1062,6 +1311,7 @@ def create_app(
                 "score":    round(d["score"], 3),
                 "cat_idx":  d["cat_idx"],
                 "year_idx": d["year_idx"],
+                "year":     d["year"],
             }
             for d in enriched
         ]
@@ -1075,7 +1325,7 @@ def create_app(
             "legend_year":      legend_year,
             "mask_data":        mask_data,
         })
-        
+
     @app.route("/similar", methods=["POST"])
     def similar():
         if not is_there_db:
@@ -1083,10 +1333,10 @@ def create_app(
         body = request.get_json()
         if not body or "embedding" not in body:
             return jsonify({"error": "Missing embedding array"}), 400
-            
+
         emb_tensor = torch.tensor(body["embedding"], dtype=torch.float32)
         results, _ = _run_ann(ann, meta, emb_tensor, k=5)
-        
+
         return jsonify({"results": results})
 
     return app
@@ -1122,7 +1372,7 @@ def main():
     model, contrastive_loss_fn, year_loss_fn, avlabels = load_cir_model(
         args.ckpt_folder, args.objects, epoch, device
     )
-    
+
     is_there_db, (ann, meta) = build_annoy_index(args.objects, args.ckpt_folder, epoch, device)
 
     cat_proxies  = contrastive_loss_fn.proxies.detach().cpu()
