@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.utils.data import random_split, DataLoader
 import json
 from train_experts_dataloader import SpecialistDataloaderWithClass, tqdm
-from models import SpecialistModel, ConditionedToYear
+from models import SpecialistModel, ConditionedToYear, ViTSpecialistModel, VGGSpecialistModel, ResNetSpecialistModel
 from core_datautils import df as data_complete
 from pytorch_metric_learning import losses
 import torch.nn.functional as F
@@ -79,6 +79,9 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--use_wandb", action="store_true")
+    parser.add_argument("--model", type=str, default='convnext', choices=['convnext', 'vgg', 'vit', 'resnet'])
+
+
 
     parser.add_argument("--agnosticity_strategy", type=str, default='normalise', choices=['normalise', 'euclidean'])
     parser.add_argument("--swapping_trick", type=str, default='do', choices=['do', 'avoid'])
@@ -178,6 +181,23 @@ def log_proxy_tsne(contrastive_loss_fn, year_loss_fn, obj2label, avlabels, epoch
 
     plt.close(fig)
 
+def load_model(dataset, args, device):
+    if args.model == 'convnext':
+        date_sensitive = SpecialistModel(len(dataset.available_labels)).to(device)
+    elif args.model == 'vit':
+        date_sensitive = ViTSpecialistModel(len(dataset.available_labels)).to(device)
+
+    elif args.model == 'vgg':
+        date_sensitive = VGGSpecialistModel(len(dataset.available_labels)).to(device)
+    elif args.model == 'resnet':
+        date_sensitive = ResNetSpecialistModel(len(dataset.available_labels)).to(device)
+
+    else:
+        raise NotImplementedError(f'Model {args.model} Not Implemented')
+
+    model = ConditionedToYear(date_sensitive, output_dim=len(dataset.available_labels), origin_model=args.model).to(device)
+    return model
+
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -224,8 +244,7 @@ def main():
 
 
     # --- Model ---
-    date_sensitive = SpecialistModel(len(dataset.available_labels)).to(device)
-    model = ConditionedToYear(date_sensitive, output_dim=len(dataset.available_labels)).to(device)
+    model = load_model(dataset, args, device)
     optimizer = torch.optim.AdamW(list(model.parameters()) + list(contrastive_loss_fn.parameters()) + list(year_loss_fn.parameters()), lr=args.lr)
 
 
